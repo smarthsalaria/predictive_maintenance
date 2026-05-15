@@ -1,102 +1,199 @@
-import json
-import paho.mqtt.client as mqtt
-import matplotlib.pyplot as plt
-from collections import deque
-import time
+import streamlit as st
+import sqlite3
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 
-# --- Configuration ---
-BROKER = "127.0.0.1"
-PORT = 1883
-TOPIC_SENSORS = "bess/cooling_pump_01/sensors"
-TOPIC_ALERTS = "bess/cooling_pump_01/alerts"
+# --- Page Configuration ---
+st.set_page_config(page_title="Edge PdM Dashboard", layout="wide")
+st.title("Industrial Edge Computing: Predictive Maintenance")
 
-# Keep rolling buffers for ALL four sensor vectors
-history_vib = deque(maxlen=50)
-history_temp = deque(maxlen=50)
-history_curr = deque(maxlen=50)
-history_cool = deque(maxlen=50)
+DB_FILE = "local_edge_data.db"
 
-def on_connect(client, userdata, flags, rc, properties=None):
-    print("[DASHBOARD] Connected to broker. Waiting silently for alerts...")
-    client.subscribe(TOPIC_SENSORS)
-    client.subscribe(TOPIC_ALERTS)
+# --- Engineering Safety Limits ---
+CRITICAL_LIMITS = {
+    'vibration': 7.1,    
+    'temperature': 80.0, 
+    'current': 26.0,     
+    'coolant': 60.0      
+}
 
-def on_message(client, userdata, msg):
-    topic = msg.topic
-    payload = json.loads(msg.payload.decode())
+COL_MAP = {
+    'vibration': 'vibration',
+    'temperature': 'temperature',
+    'current': 'current',
+    'coolant': 'coolant_level'
+}
 
-    # If it's normal data, save all 4 metrics to their respective histories
-    if topic == TOPIC_SENSORS:
-        history_vib.append(payload['vibration_rms'])
-        history_temp.append(payload['temperature_c'])
-        history_curr.append(payload['current_a'])
-        history_cool.append(payload['coolant_level_cm'])
+# --- Dashboard Controls ---
+st.markdown("### Live Refresh Control")
+pause_refresh = st.toggle(" **FREEZE DASHBOARD** (Turn ON to pause live data so you can drag, pan, and zoom charts)", value=False)
 
-    # If it's an alert, trigger the multi-graph!
-    elif topic == TOPIC_ALERTS:
-        print("\n🚨 [DASHBOARD] CRITICAL ALERT RECEIVED! Generating Comprehensive Incident Report...")
-        generate_graph(payload['sensor_data'])
+# Determine the streaming speed based on the toggle
+refresh_rate = None if pause_refresh else 2
 
-def generate_graph(anomaly_data):
-    timestamp = int(time.time())
-    
-    # Create a 2x2 grid of subplots for a professional diagnostic layout
-    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f'Comprehensive Incident Report: Cooling Pump 01\nTimestamp: {timestamp}', fontsize=16, fontweight='bold')
-
-    x_axis = range(len(history_vib))
-    fault_index = len(history_vib) - 1 if len(history_vib) > 0 else 0
-
-    # --- Plot 1: Vibration ---
-    if len(history_vib) > 0:
-        axs[0, 0].plot(x_axis, list(history_vib), color='blue', label='Vibration History')
-    axs[0, 0].scatter(fault_index, anomaly_data['vibration_rms'], color='red', s=120, zorder=5, label='Fault Trigger')
-    axs[0, 0].axhline(y=7.1, color='orange', linestyle='--', label='ISO Threshold')
-    axs[0, 0].set_title('Vibration RMS (mm/s)')
-    axs[0, 0].grid(True)
-    axs[0, 0].legend()
-
-    # --- Plot 2: Temperature ---
-    if len(history_temp) > 0:
-        axs[0, 1].plot(x_axis, list(history_temp), color='firebrick', label='Temperature History')
-    axs[0, 1].scatter(fault_index, anomaly_data['temperature_c'], color='red', s=120, zorder=5)
-    axs[0, 1].axhline(y=75.0, color='orange', linestyle='--', label='NEMA Temp Limit')
-    axs[0, 1].set_title('Casing Temperature (°C)')
-    axs[0, 1].grid(True)
-    axs[0, 1].legend()
-
-    # --- Plot 3: Current ---
-    if len(history_curr) > 0:
-        axs[1, 0].plot(x_axis, list(history_curr), color='green', label='Current History')
-    axs[1, 0].scatter(fault_index, anomaly_data['current_a'], color='red', s=120, zorder=5)
-    axs[1, 0].axhline(y=25.0, color='orange', linestyle='--', label='Overcurrent Threshold')
-    axs[1, 0].set_title('Motor Current (A)')
-    axs[1, 0].grid(True)
-    axs[1, 0].legend()
-
-    # --- Plot 4: Coolant Distance ---
-    if len(history_cool) > 0:
-        axs[1, 1].plot(x_axis, list(history_cool), color='purple', label='Ultrasonic Distance')
-    axs[1, 1].scatter(fault_index, anomaly_data['coolant_level_cm'], color='red', s=120, zorder=5)
-    axs[1, 1].set_title('Coolant Reservoir Distance (cm) [Increase = Leak]')
-    axs[1, 1].grid(True)
-    axs[1, 1].legend()
-
-    # Adjust layout so labels don't overlap, then save
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    filename = f'Comprehensive_Report_{timestamp}.png'
-    plt.savefig(filename)
-    plt.close()
-    
-    print(f"✅ [DASHBOARD] Comprehensive Report saved successfully as {filename}\n")
-
-if __name__ == "__main__":
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    client.on_connect = on_connect
-    client.on_message = on_message
-
+def fetch_data():
     try:
-        client.connect(BROKER, PORT, 60)
-        client.loop_forever()
+        conn = sqlite3.connect(DB_FILE)
+        query = "SELECT timestamp, vibration, temperature, current, coolant_level, is_anomaly, culprit_sensor FROM telemetry ORDER BY id DESC LIMIT 60"
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df.iloc[::-1].reset_index(drop=True)
     except Exception as e:
-        print(f"[DASHBOARD] Connection failed: {e}")
+        return pd.DataFrame()
+
+def fetch_anomaly_history():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        query = "SELECT timestamp, culprit_sensor as Root_Cause, vibration, temperature, current, coolant_level as coolant FROM telemetry WHERE is_anomaly = 1 ORDER BY id DESC LIMIT 15"
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
+def create_sensor_chart(df, col_name, title, limit, active_color):
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=df['timestamp'], 
+        y=df[col_name], 
+        mode='lines', 
+        name=f"Actual {title}",
+        line=dict(color=active_color, width=3)
+    ))
+    
+    fig.add_hline(
+        y=limit, 
+        line_dash="dot", 
+        line_color="red", 
+        line_width=2,
+        annotation_text=f"CRITICAL LIMIT ({limit})", 
+        annotation_position="bottom right",
+        annotation_font_color="red"
+    )
+    
+    fig.update_layout(
+        margin=dict(l=10, r=20, t=10, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis_title="",
+        yaxis_title="Sensor Value",
+        height=250
+    )
+    return fig
+
+@st.fragment(run_every=refresh_rate)
+def render_live_dashboard():
+    df = fetch_data()
+
+    if df.empty or 'culprit_sensor' not in df.columns:
+        st.warning("Waiting for Edge AI to populate database... Please ensure Edge_Device.py is running.")
+        return
+
+    latest_data = df.iloc[-1]
+    
+    try:
+        is_fault = int(latest_data['is_anomaly']) == 1
+    except:
+        is_fault = False
+
+    if pd.notnull(latest_data['culprit_sensor']) and latest_data['culprit_sensor'].strip().lower() != "none":
+        culprit = str(latest_data['culprit_sensor']).strip().lower()
+    else:
+        culprit = None
+
+    rul_text = "Analyzing trend over 10-second window..."
+    is_critical = False
+    
+    if is_fault and culprit in COL_MAP:
+        sensor_col = COL_MAP[culprit]
+        current_val = latest_data[sensor_col]
+        limit = CRITICAL_LIMITS[culprit]
+        
+        if current_val >= limit:
+            is_critical = True
+        else:
+            recent_data = df[sensor_col].tail(10).values
+            if len(recent_data) >= 5:
+                x_axis = np.arange(len(recent_data))
+                slope, _ = np.polyfit(x_axis, recent_data, 1)
+                velocity = slope
+                
+                if velocity > 0.01:
+                    remaining_distance = limit - current_val
+                    rul_seconds = remaining_distance / velocity
+                    rul_text = f"**Degradation Rate:** +{velocity:.2f} per sec | **Remaining Useful Life (RUL):** {rul_seconds:.1f} seconds"
+                elif velocity < -0.01:
+                    rul_text = "Condition improving. Monitoring..."
+                else:
+                    rul_text = "Elevated but stable. Monitoring..."
+
+    if is_critical:
+        st.error(f"🚨 **CRITICAL SHUTDOWN!** {str(culprit).upper()} breached NEMA/ISO Safety Limits!")
+    elif is_fault and culprit:
+        st.warning(f"⚠️ **PREDICTIVE MAINTENANCE WARNING:** Early degradation isolated to {str(culprit).upper()}.\n\n{rul_text}")
+    else:
+        st.success("✅ **System Status:** Normal Operations. All sensors healthy.")
+
+    st.markdown("---")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Vibration (mm/s)", f"{latest_data['vibration']:.2f}")
+    col2.metric("Temperature (°C)", f"{latest_data['temperature']:.2f}")
+    col3.metric("Current (A)", f"{latest_data['current']:.2f}")
+    col4.metric("Coolant Level (cm)", f"{latest_data['coolant_level']:.2f}")
+
+    st.markdown("---")
+
+    st.subheader("Live Edge Telemetry Stream")
+    
+    chart_col1, chart_col2 = st.columns(2)
+    chart_col3, chart_col4 = st.columns(2)
+
+    COLOR_NORMAL = "#00cc66" 
+    COLOR_WARNING = "#ffcc00" 
+    COLOR_CRITICAL = "#ff0000" 
+
+    if is_critical:
+        active_color = COLOR_CRITICAL
+        active_tag = " `[CRITICAL LIMIT]`"
+    else:
+        active_color = COLOR_WARNING
+        active_tag = " `[PdM WARNING]`"
+
+    no_menu_config = {'displayModeBar': False}
+
+    with chart_col1:
+        st.markdown(f"#### Vibration Trends {active_tag if culprit == 'vibration' else ' `[Normal]`'}")
+        fig_vib = create_sensor_chart(df, 'vibration', 'Vibration', CRITICAL_LIMITS['vibration'], active_color if culprit == 'vibration' else COLOR_NORMAL)
+        st.plotly_chart(fig_vib, width='stretch', config=no_menu_config)
+
+    with chart_col2:
+        st.markdown(f"#### Temperature Profile {active_tag if culprit == 'temperature' else ' `[Normal]`'}")
+        fig_temp = create_sensor_chart(df, 'temperature', 'Temperature', CRITICAL_LIMITS['temperature'], active_color if culprit == 'temperature' else COLOR_NORMAL)
+        st.plotly_chart(fig_temp, width='stretch', config=no_menu_config)
+
+    with chart_col3:
+        st.markdown(f"#### Motor Current {active_tag if culprit == 'current' else ' `[Normal]`'}")
+        fig_curr = create_sensor_chart(df, 'current', 'Current', CRITICAL_LIMITS['current'], active_color if culprit == 'current' else COLOR_NORMAL)
+        st.plotly_chart(fig_curr, width='stretch', config=no_menu_config)
+
+    with chart_col4:
+        st.markdown(f"#### Coolant Level {active_tag if culprit == 'coolant' else ' `[Normal]`'}")
+        fig_cool = create_sensor_chart(df, 'coolant_level', 'Coolant', CRITICAL_LIMITS['coolant'], active_color if culprit == 'coolant' else COLOR_NORMAL)
+        st.plotly_chart(fig_cool, width='stretch', config=no_menu_config)
+
+    st.markdown("---")
+
+    # 4. History of Anomalies Table
+    st.subheader(" Incident History Log")
+    history_df = fetch_anomaly_history()
+    
+    if not history_df.empty:
+        history_df['Root_Cause'] = history_df['Root_Cause'].str.upper()
+        st.dataframe(history_df, width='stretch', hide_index=True)
+    else:
+        st.info("No anomalies recorded in the database yet. The system is perfectly healthy.")
+
+# Execute the streaming fragment
+render_live_dashboard()

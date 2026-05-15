@@ -1,0 +1,13 @@
+# MQTT
+paho-mqtt>=2.0.0
+
+# ml and calculations
+scikit-learn
+numpy
+
+# data manupulation
+pandas
+
+# dashboard
+streamlit
+plotly
