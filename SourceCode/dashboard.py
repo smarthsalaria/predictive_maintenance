@@ -4,13 +4,13 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-# --- Page Configuration ---
+
 st.set_page_config(page_title="Edge PdM Dashboard", layout="wide")
 st.title("Industrial Edge Computing: Predictive Maintenance")
 
 DB_FILE = "local_edge_data.db"
 
-# --- Engineering Safety Limits ---
+
 CRITICAL_LIMITS = {
     'vibration': 7.1,    
     'temperature': 80.0, 
@@ -25,11 +25,9 @@ COL_MAP = {
     'coolant': 'coolant_level'
 }
 
-# --- Dashboard Controls ---
 st.markdown("### Live Refresh Control")
 pause_refresh = st.toggle(" **FREEZE DASHBOARD** (Turn ON to pause live data so you can drag, pan, and zoom charts)", value=False)
 
-# Determine the streaming speed based on the toggle
 refresh_rate = None if pause_refresh else 2
 
 def fetch_data():
@@ -185,7 +183,6 @@ def render_live_dashboard():
 
     st.markdown("---")
 
-    # 4. History of Anomalies Table
     st.subheader(" Incident History Log")
     history_df = fetch_anomaly_history()
     
@@ -195,5 +192,4 @@ def render_live_dashboard():
     else:
         st.info("No anomalies recorded in the database yet. The system is perfectly healthy.")
 
-# Execute the streaming fragment
 render_live_dashboard()

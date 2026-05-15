@@ -13,7 +13,6 @@ TOPIC_SUB = "bess/cooling_pump_01/sensors"
 TOPIC_PUB = "bess/cooling_pump_01/alerts"
 DB_FILE = "local_edge_data.db"
 
-# --- Engineering Safety Limits ---
 CRITICAL_LIMITS = {
     'vibration': 7.1,    
     'temperature': 80.0, 
@@ -24,7 +23,6 @@ CRITICAL_LIMITS = {
 train_mean = None
 train_std = None
 
-# --- STATE MACHINE VARIABLES ---
 consecutive_anomalies = 0  
 consecutive_normal = 0
 active_fault_state = None 
@@ -80,9 +78,7 @@ def get_training_data():
     except Exception:
         return None
 
-# ==========================================
-# ML MODEL 1: ISOLATION FOREST
-# ==========================================
+
 print("[EDGE AI] Initializing Unsupervised ML Model (Isolation Forest)...")
 anomaly_model = IsolationForest(contamination=0.02, random_state=42)
 X_train = get_training_data()
@@ -138,7 +134,6 @@ def on_message(client, userdata, msg):
             
             if consecutive_anomalies >= 3:
                 
-                # RCA Logic
                 fault_idx = np.argmax(z_scores)
                 if limit_breached:
                     for i, sensor in enumerate(sensor_names):

@@ -8,13 +8,10 @@ TOPIC = "bess/cooling_pump_01/simulation"
 def send_command(cmd_string):
     client = mqtt.Client()
     try:
-        # Connect to your local broker
         client.connect(BROKER, PORT, 60)
         
-        # Python handles the double-quotes perfectly here
         payload = json.dumps({"simulation": cmd_string}) 
         
-        # Send the message
         client.publish(TOPIC, payload)
         print(f"\n[CONTROL PANEL] Successfully sent: {payload}")
         
