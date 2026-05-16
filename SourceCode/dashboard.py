@@ -1,195 +1,222 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 
 
-st.set_page_config(page_title="Edge PdM Dashboard", layout="wide")
-st.title("Industrial Edge Computing: Predictive Maintenance")
+st.set_page_config(
+    page_title="Industrial Edge Dashboard", 
+    page_icon="", 
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+st.markdown("""
+    <style>
+        .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+        h1, h2, h3 { color: #f8fafc; }
+        .stMetric label { color: #94a3b8 !important; }
+        .stMetric value { color: #deff9a !important; }
+        div[data-testid="stDataFrame"] { background-color: #0f172a; }
+    </style>
+""", unsafe_allow_html=True)
 
 DB_FILE = "local_edge_data.db"
+LIMITS = {"vibration": 7.1, "temperature": 80.0, "current": 26.0, "coolant": 60.0}
 
-
-CRITICAL_LIMITS = {
-    'vibration': 7.1,    
-    'temperature': 80.0, 
-    'current': 26.0,     
-    'coolant': 60.0      
-}
-
-COL_MAP = {
-    'vibration': 'vibration',
-    'temperature': 'temperature',
-    'current': 'current',
-    'coolant': 'coolant_level'
-}
-
-st.markdown("### Live Refresh Control")
-pause_refresh = st.toggle(" **FREEZE DASHBOARD** (Turn ON to pause live data so you can drag, pan, and zoom charts)", value=False)
-
-refresh_rate = None if pause_refresh else 2
-
-def fetch_data():
+def fetch_telemetry(limit=60):
     try:
-        conn = sqlite3.connect(DB_FILE)
-        query = "SELECT timestamp, vibration, temperature, current, coolant_level, is_anomaly, culprit_sensor FROM telemetry ORDER BY id DESC LIMIT 60"
-        df = pd.read_sql_query(query, conn)
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        df = pd.read_sql(f"SELECT * FROM telemetry ORDER BY id DESC LIMIT {limit}", conn)
         conn.close()
-        return df.iloc[::-1].reset_index(drop=True)
-    except Exception as e:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        return df.iloc[::-1].reset_index(drop=True) 
+    except Exception:
         return pd.DataFrame()
 
-def fetch_anomaly_history():
+def fetch_incident_history():
     try:
-        conn = sqlite3.connect(DB_FILE)
-        query = "SELECT timestamp, culprit_sensor as Root_Cause, vibration, temperature, current, coolant_level as coolant FROM telemetry WHERE is_anomaly = 1 ORDER BY id DESC LIMIT 15"
-        df = pd.read_sql_query(query, conn)
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        df = pd.read_sql("SELECT timestamp, culprit_sensor AS Root_Cause, vibration, temperature, current, coolant_level AS coolant FROM telemetry WHERE is_anomaly = 1 ORDER BY id DESC LIMIT 15", conn)
         conn.close()
         return df
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
-def create_sensor_chart(df, col_name, title, limit, active_color):
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        x=df['timestamp'], 
-        y=df[col_name], 
-        mode='lines', 
-        name=f"Actual {title}",
-        line=dict(color=active_color, width=3)
-    ))
-    
-    fig.add_hline(
-        y=limit, 
-        line_dash="dot", 
-        line_color="red", 
-        line_width=2,
-        annotation_text=f"CRITICAL LIMIT ({limit})", 
-        annotation_position="bottom right",
-        annotation_font_color="red"
-    )
-    
-    fig.update_layout(
-        margin=dict(l=10, r=20, t=10, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis_title="",
-        yaxis_title="Sensor Value",
-        height=250
-    )
-    return fig
+st.markdown("""
+    <style>
+        /* Force the logo height and ensure it doesn't stretch */
+        [data-testid="stImage"] img {
+            height: auto !important;  /* Adjust this to make the logo taller or shorter */
+            width: auto !important;
+            margin-left: auto;
+            margin-right: auto;
+            display: block;
+        }
+        /* Tighten the gap between the title and the logo */
+        .header-container {
+            margin-top: -20px;
+            text-align: center;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-@st.fragment(run_every=refresh_rate)
+header_content, header_control = st.columns([0.9, 0.1])
+
+with header_content:
+    # 1. Centering the Logo using an inner column trick
+    # [Left Spacer, Logo Slot, Right Spacer]
+    _, logo_center, _ = st.columns([0.4, 0.2, 0.4])
+    with logo_center:
+        try:
+            # We don't use use_container_width here so the CSS 'height' takes priority
+            st.image("cu_logo.png") 
+        except Exception:
+            st.markdown("<h1 style='text-align: center;'>🎓</h1>", unsafe_allow_html=True)
+
+    st.markdown("""
+        <div style="text-align: center;">
+            <h1 style="margin-bottom: 0px;">Industrial Equipment Failure Prediction Using Edge Analytics</h1>
+            <p style="font-size: 18px; color: #94a3b8; margin-top: 5px;">
+                Real-time predictive maintenance monitoring for Industrial Asset.<br>
+                <strong>Current Asset:</strong> Heavy-Duty Liquid Cooling Pump Motor.
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
+
+
+with header_control:
+    # Keeps the pause button at the top right so it doesn't interrupt the center flow
+    st.markdown("<br>", unsafe_allow_html=True)
+    is_paused = st.toggle("⏸️ Pause", key="pause_feed", value=False)
+
+
+@st.fragment(run_every="1s")
 def render_live_dashboard():
-    df = fetch_data()
-
-    if df.empty or 'culprit_sensor' not in df.columns:
-        st.warning("Waiting for Edge AI to populate database... Please ensure Edge_Device.py is running.")
+    
+    if not st.session_state.pause_feed:
+        df = fetch_telemetry(60)
+        st.session_state['cached_df'] = df
+    else:
+        df = st.session_state.get('cached_df', pd.DataFrame())
+    
+    if df.empty:
+        st.warning(" No telemetry data found. Is the Edge AI node running?")
         return
 
-    latest_data = df.iloc[-1]
+    latest = df.iloc[-1]
+    is_anomaly = latest['is_anomaly'] == 1
+    culprit_string = str(latest['culprit_sensor']).upper()
+    velocity = float(latest['velocity']) if 'velocity' in latest else 0.0
+    confidence = float(latest['confidence']) if 'confidence' in latest else 0.0
     
-    try:
-        is_fault = int(latest_data['is_anomaly']) == 1
-    except:
-        is_fault = False
-
-    if pd.notnull(latest_data['culprit_sensor']) and latest_data['culprit_sensor'].strip().lower() != "none":
-        culprit = str(latest_data['culprit_sensor']).strip().lower()
-    else:
-        culprit = None
-
-    rul_text = "Analyzing trend over 10-second window..."
-    is_critical = False
     
-    if is_fault and culprit in COL_MAP:
-        sensor_col = COL_MAP[culprit]
-        current_val = latest_data[sensor_col]
-        limit = CRITICAL_LIMITS[culprit]
-        
-        if current_val >= limit:
-            is_critical = True
-        else:
-            recent_data = df[sensor_col].tail(10).values
-            if len(recent_data) >= 5:
-                x_axis = np.arange(len(recent_data))
-                slope, _ = np.polyfit(x_axis, recent_data, 1)
-                velocity = slope
+    confidence_text = f" |  AI Confidence: {confidence}%"
+    rul_text = " | RUL: Optimal"
+
+    if culprit_string != "NONE" and velocity > 0:
+        min_countdown = float('inf')
+        for sensor_name in ["vibration", "temperature", "current", "coolant"]:
+            if sensor_name.upper() in culprit_string:
+                db_col = sensor_name if sensor_name != "coolant" else "coolant_level"
+                current_val = latest[db_col]
+                limit_val = LIMITS[sensor_name]
                 
-                if velocity > 0.01:
-                    remaining_distance = limit - current_val
-                    rul_seconds = remaining_distance / velocity
-                    rul_text = f"**Degradation Rate:** +{velocity:.2f} per sec | **Remaining Useful Life (RUL):** {rul_seconds:.1f} seconds"
-                elif velocity < -0.01:
-                    rul_text = "Condition improving. Monitoring..."
-                else:
-                    rul_text = "Elevated but stable. Monitoring..."
-
-    if is_critical:
-        st.error(f"🚨 **CRITICAL SHUTDOWN!** {str(culprit).upper()} breached NEMA/ISO Safety Limits!")
-    elif is_fault and culprit:
-        st.warning(f"⚠️ **PREDICTIVE MAINTENANCE WARNING:** Early degradation isolated to {str(culprit).upper()}.\n\n{rul_text}")
-    else:
-        st.success("✅ **System Status:** Normal Operations. All sensors healthy.")
-
-    st.markdown("---")
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Vibration (mm/s)", f"{latest_data['vibration']:.2f}")
-    col2.metric("Temperature (°C)", f"{latest_data['temperature']:.2f}")
-    col3.metric("Current (A)", f"{latest_data['current']:.2f}")
-    col4.metric("Coolant Level (cm)", f"{latest_data['coolant_level']:.2f}")
-
-    st.markdown("---")
-
-    st.subheader("Live Edge Telemetry Stream")
+                if current_val < limit_val:
+                    time_left = (limit_val - current_val) / velocity
+                    if time_left < min_countdown:
+                        min_countdown = time_left
+        
+        if min_countdown != float('inf'):
+            rul_text = f" |  Time to Failure: {min_countdown:.1f}s"
+            
     
-    chart_col1, chart_col2 = st.columns(2)
-    chart_col3, chart_col4 = st.columns(2)
-
-    COLOR_NORMAL = "#00cc66" 
-    COLOR_WARNING = "#ffcc00" 
-    COLOR_CRITICAL = "#ff0000" 
-
-    if is_critical:
-        active_color = COLOR_CRITICAL
-        active_tag = " `[CRITICAL LIMIT]`"
+    banner_extras = confidence_text + rul_text
+            
+    
+    if is_anomaly:
+        st.error(f" CRITICAL ASSET FAULT: Motor Seizure / Leak Imminent ({culprit_string}){banner_extras}")
+    elif culprit_string != "NONE":
+        st.warning(f" PdM WARNING: Mechanical drift detected in pump motor ({culprit_string}).{banner_extras}")
     else:
-        active_color = COLOR_WARNING
-        active_tag = " `[PdM WARNING]`"
+        st.success(f" SYSTEM NORMAL: Asset operating within healthy mechanical baselines.{banner_extras}")
 
-    no_menu_config = {'displayModeBar': False}
-
-    with chart_col1:
-        st.markdown(f"#### Vibration Trends {active_tag if culprit == 'vibration' else ' `[Normal]`'}")
-        fig_vib = create_sensor_chart(df, 'vibration', 'Vibration', CRITICAL_LIMITS['vibration'], active_color if culprit == 'vibration' else COLOR_NORMAL)
-        st.plotly_chart(fig_vib, width='stretch', config=no_menu_config)
-
-    with chart_col2:
-        st.markdown(f"#### Temperature Profile {active_tag if culprit == 'temperature' else ' `[Normal]`'}")
-        fig_temp = create_sensor_chart(df, 'temperature', 'Temperature', CRITICAL_LIMITS['temperature'], active_color if culprit == 'temperature' else COLOR_NORMAL)
-        st.plotly_chart(fig_temp, width='stretch', config=no_menu_config)
-
-    with chart_col3:
-        st.markdown(f"#### Motor Current {active_tag if culprit == 'current' else ' `[Normal]`'}")
-        fig_curr = create_sensor_chart(df, 'current', 'Current', CRITICAL_LIMITS['current'], active_color if culprit == 'current' else COLOR_NORMAL)
-        st.plotly_chart(fig_curr, width='stretch', config=no_menu_config)
-
-    with chart_col4:
-        st.markdown(f"#### Coolant Level {active_tag if culprit == 'coolant' else ' `[Normal]`'}")
-        fig_cool = create_sensor_chart(df, 'coolant_level', 'Coolant', CRITICAL_LIMITS['coolant'], active_color if culprit == 'coolant' else COLOR_NORMAL)
-        st.plotly_chart(fig_cool, width='stretch', config=no_menu_config)
-
+    
+    cols = st.columns(4)
+    cols[0].metric("Vibration RMS", f"{latest['vibration']:.3f} mm/s")
+    cols[1].metric("Casing Temp", f"{latest['temperature']:.2f} °C")
+    cols[2].metric("Motor Current", f"{latest['current']:.2f} A")
+    cols[3].metric("Coolant Level", f"{latest['coolant_level']:.2f} cm")
+    
     st.markdown("---")
 
-    st.subheader(" Incident History Log")
-    history_df = fetch_anomaly_history()
     
-    if not history_df.empty:
-        history_df['Root_Cause'] = history_df['Root_Cause'].str.upper()
-        st.dataframe(history_df, width='stretch', hide_index=True)
+    chart_cols = st.columns(2)
+    sensors = ["vibration", "temperature", "current", "coolant"]
+    db_cols = ["vibration", "temperature", "current", "coolant_level"]
+    titles = ["Vibration Trends", "Temperature Profile", "Motor Current", "Coolant Tank Ultrasonic Distance"]
+    
+    for idx, (sensor_name, db_col, title) in enumerate(zip(sensors, db_cols, titles)):
+        latest_val = latest[db_col]
+        limit_val = LIMITS[sensor_name]
+        is_culprit = sensor_name.upper() in culprit_string
+        
+        if is_culprit and is_anomaly:
+            status_text = "**:red[[CRITICAL AI FAULT]]**"
+            line_color = "#ef4444" 
+        elif is_culprit and not is_anomaly:
+            status_text = "**:orange[[PdM WARNING]]**"
+            line_color = "#f59e0b" 
+        else:
+            status_text = "**:green[[Normal]]**"
+            line_color = "#10b981" 
+            
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'], y=df[db_col], mode='lines', 
+            line=dict(color=line_color, width=3),
+            fill='tozeroy',
+            fillcolor=f"rgba{tuple(int(line_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (0.1,)}"
+        ))
+        
+        fig.add_hline(
+            y=limit_val, line_dash="dash", line_color="#ef4444", 
+            annotation_text=f"SHUTDOWN LIMIT ({limit_val})", 
+            annotation_position="bottom right",
+            annotation_font_color="#ef4444"
+        )
+        
+        if is_culprit and velocity > 0 and latest_val < limit_val:
+            last_time = df['timestamp'].iloc[-1]
+            time_to_limit = (limit_val - latest_val) / velocity
+            time_to_limit = min(time_to_limit, 45) 
+            future_time = last_time + pd.Timedelta(seconds=time_to_limit)
+            future_val = latest_val + (velocity * time_to_limit)
+            
+            fig.add_trace(go.Scatter(
+                x=[last_time, future_time], y=[latest_val, future_val], 
+                mode='lines', line=dict(color='yellow', width=3, dash='dot'), name="RUL Projection"
+            ))
+                      
+        fig.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10), height=220,
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)", tickfont=dict(color="#64748b")),
+            yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)", tickfont=dict(color="#64748b")),
+            showlegend=False
+        )
+        
+        with chart_cols[idx % 2]:
+            st.markdown(f"### {title} {status_text}")
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+    st.markdown("---")
+    st.markdown("###  Incident History Log")
+    incidents_df = fetch_incident_history()
+    
+    if not incidents_df.empty:
+        st.dataframe(incidents_df, use_container_width=True, hide_index=True, height=250)
     else:
-        st.info("No anomalies recorded in the database yet. The system is perfectly healthy.")
+        st.info("No anomalies recorded. The asset is operating optimally.")
 
 render_live_dashboard()

@@ -5,211 +5,230 @@ import numpy as np
 import paho.mqtt.client as mqtt
 from sklearn.ensemble import IsolationForest
 from sklearn.linear_model import LinearRegression
-from datetime import datetime
+from collections import deque
+
 
 BROKER = "127.0.0.1"
 PORT = 1883
-TOPIC_SUB = "bess/cooling_pump_01/sensors"
-TOPIC_PUB = "bess/cooling_pump_01/alerts"
+TOPIC_SENSORS = "bess/cooling_pump_01/sensors"
+TOPIC_ALERTS = "bess/cooling_pump_01/alerts"
 DB_FILE = "local_edge_data.db"
+LIMITS = {"vibration": 7.1, "temperature": 80.0, "current": 26.0, "coolant": 60.0}
 
-CRITICAL_LIMITS = {
-    'vibration': 7.1,    
-    'temperature': 80.0, 
-    'current': 26.0,     
-    'coolant': 60.0      
-}
 
+consecutive_anomalies = 0
+total_incidents = 0  
+STRIKE_THRESHOLD = 3
+anomaly_model = None
 train_mean = None
 train_std = None
 
-consecutive_anomalies = 0  
-consecutive_normal = 0
-active_fault_state = None 
+rul_window_y = deque(maxlen=10)
+rul_window_x = deque(maxlen=10)
+reading_counter = 0
 
-raw_feature_buffer = []  
-degradation_buffer = []  
 
-def init_database():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS telemetry (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            vibration REAL,
-            temperature REAL,
-            current REAL,
-            coolant_level REAL,
-            is_anomaly INTEGER,
-            culprit_sensor TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_database()
-
-def log_to_db(data, is_anomaly, culprit_sensor=None):
+def init_db():
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO telemetry 
-            (vibration, temperature, current, coolant_level, is_anomaly, culprit_sensor)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (data['vibration_rms'], data['temperature_c'], data['current_a'], data['coolant_level_cm'], int(is_anomaly), culprit_sensor))
+            CREATE TABLE IF NOT EXISTS telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                vibration REAL NOT NULL,
+                temperature REAL NOT NULL,
+                current REAL NOT NULL,
+                coolant_level REAL NOT NULL,
+                is_anomaly INTEGER NOT NULL,
+                culprit_sensor TEXT,
+                velocity REAL DEFAULT 0.0,
+                confidence REAL DEFAULT 0.0
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON telemetry(timestamp)')
         conn.commit()
         conn.close()
+        print("✅ SQLite Database Initialized.")
     except Exception as e:
-        pass
+        print(f"❌ Database Init Error: {e}")
 
-def get_training_data():
+
+def train_model():
+    global anomaly_model, train_mean, train_std
+    print("🧠 Fetching historical baseline from SQLite...")
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
-        cursor.execute('SELECT vibration, temperature, current, coolant_level FROM telemetry WHERE is_anomaly = 0 ORDER BY id DESC LIMIT 1000')
+        cursor.execute("SELECT vibration, temperature, current, coolant_level FROM telemetry WHERE is_anomaly = 0 ORDER BY id DESC LIMIT 1000")
         rows = cursor.fetchall()
         conn.close()
-        
-        clean_rows = [r for r in rows if r[0] < 5.0 and r[1] < 60.0 and r[2] < 20.0 and r[3] < 30.0]
-        if len(clean_rows) > 50: return np.array(clean_rows)
-        return None
-    except Exception:
-        return None
 
+        if len(rows) < 50:
+            print("⚠️ Insufficient historical data. Synthesizing initial baseline...")
+            X_train = np.array([
+                [np.random.normal(3.0, 0.05), np.random.normal(50.0, 0.5), np.random.normal(16.0, 0.1), np.random.normal(20.0, 0.05)]
+                for _ in range(500)
+            ])
+        else:
+            X_train = np.array(rows)
+            print(f"✅ Successfully loaded {len(X_train)} historical records.")
 
-print("[EDGE AI] Initializing Unsupervised ML Model (Isolation Forest)...")
-anomaly_model = IsolationForest(contamination=0.02, random_state=42)
-X_train = get_training_data()
+        anomaly_model = IsolationForest(contamination=0.05, random_state=42)
+        anomaly_model.fit(X_train)
+        train_mean = np.mean(X_train, axis=0)
+        train_std = np.std(X_train, axis=0)
+        print("✅ Isolation Forest Model Trained.")
+    except Exception as e:
+        print(f"❌ Model Training Error: {e}")
 
-if X_train is not None:
-    print(f"[EDGE AI] Training ML on CLEAN historical telemetry... ({len(X_train)} records)")
-    anomaly_model.fit(X_train)
-    train_mean = np.mean(X_train, axis=0)
-    train_std = np.maximum(np.std(X_train, axis=0), 0.5) 
-else:
-    print("[EDGE AI] Falling back to synthesized baseline...")
-    X_train_normal = np.random.normal(loc=[3.0, 50.0, 16.5, 20.0], scale=[0.05, 0.2, 0.1, 0.05], size=(500, 4))
-    anomaly_model.fit(X_train_normal)
-    train_mean = np.mean(X_train_normal, axis=0)
-    train_std = np.maximum(np.std(X_train_normal, axis=0), 0.5)
-
-def on_connect(client, userdata, flags, rc, properties=None):
-    print(f"[EDGE AI] Connected to local broker. Listening on {TOPIC_SUB}...\n")
-    client.subscribe(TOPIC_SUB)
 
 def on_message(client, userdata, msg):
-    global consecutive_anomalies, consecutive_normal, active_fault_state, raw_feature_buffer, degradation_buffer
+    global consecutive_anomalies, total_incidents, anomaly_model, train_mean, train_std
+    global rul_window_x, rul_window_y, reading_counter
+
+    start_time = time.perf_counter()
+    reading_counter += 1
+
     try:
         data = json.loads(msg.payload.decode())
-        data['timestamp'] = datetime.now().strftime("%H:%M:%S")
-        
-        current_features = [data['vibration_rms'], data['temperature_c'], data['current_a'], data['coolant_level_cm']]
-        sensor_names = ['vibration', 'temperature', 'current', 'coolant']
-        
-        raw_feature_buffer.append(current_features)
-        if len(raw_feature_buffer) > 3:
-            raw_feature_buffer.pop(0)
-        
-        smoothed_features = np.mean(raw_feature_buffer, axis=0)
-        
-       
-        ml_anomaly = (anomaly_model.predict([smoothed_features])[0] == -1)
-        
-        z_scores = np.abs((smoothed_features - train_mean) / train_std)
-        stat_anomaly = (np.max(z_scores) > 3.5)
-        
-        limit_breached = False
-        for i, sensor in enumerate(sensor_names):
-            if current_features[i] >= CRITICAL_LIMITS[sensor]:
-                limit_breached = True
-                break
-                
-        is_anomaly = ml_anomaly or stat_anomaly or limit_breached
+        vib = data['vibration_rms']
+        temp = data['temperature_c']
+        curr = data['current_a']
+        cool = data['coolant_level_cm']
+        features = np.array([[vib, temp, curr, cool]])
+
+        ml_anomaly = (anomaly_model.predict(features)[0] == -1)
+        safe_std_devs = np.maximum(train_std, 0.5) 
+        z_scores = np.abs((features[0] - train_mean) / safe_std_devs)
+        stat_anomaly = (np.max(z_scores) > 4.0)
+
+        failing_sensors = []
+        sensor_names = ["vibration", "temperature", "current", "coolant"]
+        sensor_values = [vib, temp, curr, cool]
+        primary_culprit_idx = -1
+        max_z = -1
+
+        if stat_anomaly or ml_anomaly:
+            for i in range(4):
+                if z_scores[i] > 4.0:
+                    if sensor_names[i] == "current" and curr < 20.0: continue
+                    elif sensor_names[i] == "temperature" and temp < 60.0: continue
+                    elif sensor_names[i] == "vibration" and vib < 5.0: continue
+                    elif sensor_names[i] == "coolant" and cool < 35.0: continue
+                    
+                    failing_sensors.append(sensor_names[i].upper())
+                    if z_scores[i] > max_z:
+                        max_z = z_scores[i]
+                        primary_culprit_idx = i
+
+        if len(failing_sensors) > 0:
+            is_anomaly = True
+            culprit_sensor = ", ".join(failing_sensors)
+        else:
+            is_anomaly = False
+            culprit_sensor = "None"
+
         
         if is_anomaly:
-            consecutive_normal = 0
             consecutive_anomalies += 1
-            
-            if consecutive_anomalies >= 3:
-                
-                fault_idx = np.argmax(z_scores)
-                if limit_breached:
-                    for i, sensor in enumerate(sensor_names):
-                        if current_features[i] >= CRITICAL_LIMITS[sensor]:
-                            fault_idx = i
-                            break
-                            
-                culprit_sensor = sensor_names[fault_idx]
-                current_value = current_features[fault_idx]
-                limit_value = CRITICAL_LIMITS[culprit_sensor]
-                
-                active_fault_state = culprit_sensor
-                data['faulty_sensor'] = culprit_sensor
-                log_to_db(data, True, culprit_sensor)
-                
-                if current_value >= limit_value:
-                    print(f"🚨 [SHUTDOWN] {culprit_sensor.upper()} breached NEMA/ISO limit ({current_value:.1f} > {limit_value})!   ")
-                    alert_msg = {"status": "CRITICAL", "message": f"LIMIT BREACHED: {culprit_sensor}", "sensor_data": data}
-                    client.publish(TOPIC_PUB, json.dumps(alert_msg))
-                    degradation_buffer.clear()
-                else:
-                    degradation_buffer.append(current_value)
-                    if len(degradation_buffer) > 10:
-                        degradation_buffer.pop(0)
-                        
-                    rul_text = "Gathering ML context window..."
-                    
-                    if len(degradation_buffer) >= 5:
-                        X = np.arange(len(degradation_buffer)).reshape(-1, 1) 
-                        y = np.array(degradation_buffer).reshape(-1, 1)       
-                        
-                        rul_model = LinearRegression()
-                        rul_model.fit(X, y)
-                        predicted_velocity = rul_model.coef_[0][0]
-                        
-                        if predicted_velocity > 0.01:
-                            remaining_distance = limit_value - current_value
-                            rul_seconds = remaining_distance / predicted_velocity
-                            rul_text = f"ML Prediction -> Rate: +{predicted_velocity:.2f}/s | RUL: {rul_seconds:.1f}s"
-                        elif predicted_velocity < -0.01:
-                            rul_text = "ML Prediction -> Condition improving."
-                        else:
-                            rul_text = "ML Prediction -> Elevated but stable."
-
-                    print(f"⚠️ [PdM ML WARNING] {culprit_sensor.upper()} | {rul_text}  ")
-            else:
-                log_to_db(data, True, None)
-                print(f"🔎 [EDGE AI] Drift detected. ML verifying ({consecutive_anomalies}/3)...")
-                
+            total_incidents += 1  
+            if primary_culprit_idx != -1:
+                rul_window_y.append(sensor_values[primary_culprit_idx])
+                rul_window_x.append(reading_counter)
         else:
-            consecutive_anomalies = 0
-            if active_fault_state is not None:
-                consecutive_normal += 1
-                if consecutive_normal >= 3:
-                    print(f"\n✅ [EDGE AI] ML CONFIRMS SYSTEM STABLE. Returning to baseline.\n")
-                    active_fault_state = None
-                    degradation_buffer.clear()
-                    log_to_db(data, False, None)
-                else:
-                    print(f"⏳ [EDGE AI] Repair detected. ML verifying stability ({consecutive_normal}/3)...")
-                    data['faulty_sensor'] = active_fault_state
-                    log_to_db(data, True, active_fault_state)
-            else:
-                consecutive_normal = 0
-                log_to_db(data, False, None)
-                print(f"✅ [EDGE AI] System Health 100%. Baseline normal...                               ", end='\r')
-            
-    except Exception as e:
-        print(f"\n[EDGE AI] Error processing payload: {e}")
+            if consecutive_anomalies > 0:
+                consecutive_anomalies -= 1 
 
-if __name__ == "__main__":
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        
+        
+        historical_weight = min(20.0, total_incidents * 0.5) 
+        
+        active_weight = min(55.0, (consecutive_anomalies / STRIKE_THRESHOLD) * 55.0)
+        
+        intensity_weight = 0.0
+        if max_z > 4.0 and is_anomaly:
+            intensity_weight = min(25.0, (max_z - 4.0) * 5.0)
+            
+        confidence_score = round(historical_weight + active_weight + intensity_weight, 1)
+
+        
+        degradation_velocity = 0.0
+        if consecutive_anomalies >= STRIKE_THRESHOLD and len(rul_window_y) >= 3:
+            X = np.array(rul_window_x).reshape(-1, 1)
+            y = np.array(rul_window_y)
+            rul_model = LinearRegression()
+            rul_model.fit(X, y)
+            degradation_velocity = rul_model.coef_[0]
+
+        
+        is_near_critical = False
+        if len(failing_sensors) > 0:
+            for i, name in enumerate(sensor_names):
+                if name.upper() in culprit_sensor:
+                    if sensor_values[i] >= (LIMITS[name] * 0.95):
+                        is_near_critical = True
+                        break
+
+        
+        if consecutive_anomalies >= STRIKE_THRESHOLD and is_near_critical:
+            system_status = "CRITICAL"
+            anomaly_flag = 1  
+            status_icon = "🔴"
+        elif consecutive_anomalies >= STRIKE_THRESHOLD:
+            system_status = "PdM WARNING (Tracking RUL)"
+            anomaly_flag = 0  
+            status_icon = "🟠"
+        elif consecutive_anomalies > 0:
+            system_status = "PdM WARNING (Verifying)"
+            anomaly_flag = 0
+            status_icon = "🟡"
+        else:
+            system_status = "NORMAL"
+            anomaly_flag = 0
+            status_icon = "🟢"
+
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=5)
+            cursor = conn.cursor()
+            db_culprit = culprit_sensor if consecutive_anomalies > 0 else "None"
+            
+            cursor.execute(
+                "INSERT INTO telemetry (vibration, temperature, current, coolant_level, is_anomaly, culprit_sensor, velocity, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (vib, temp, curr, cool, anomaly_flag, db_culprit, degradation_velocity, confidence_score)
+            )
+            conn.commit()
+            conn.close()
+        except sqlite3.OperationalError:
+            pass 
+
+        if system_status != "NORMAL":
+            alert_payload = {"status": system_status, "root_cause": culprit_sensor, "velocity": round(degradation_velocity, 4), "confidence": confidence_score}
+            client.publish(TOPIC_ALERTS, json.dumps(alert_payload))
+
+        end_time = time.perf_counter()
+        latency_ms = (end_time - start_time) * 1000
+        print(f"{status_icon} Inference: {latency_ms:.2f}ms | Conf: {confidence_score}% | Strikes: {consecutive_anomalies} | History: {total_incidents}")
+
+    except Exception as e:
+        print(f"❌ Processing Error: {e}")
+
+def on_connect(client, userdata, flags, rc):
+    print(f"✅ Connected to MQTT Broker with code {rc}")
+    client.subscribe(TOPIC_SENSORS)
+
+def start_edge_node():
+    init_db()
+    train_model()
+    client = mqtt.Client()
     client.on_connect = on_connect
     client.on_message = on_message
     try:
         client.connect(BROKER, PORT, 60)
         client.loop_forever()
-    except Exception as e:
-        print(f"[EDGE AI] Connection failed: {e}")
+    except KeyboardInterrupt:
+        pass
+
+if __name__ == "__main__":
+    start_edge_node()
