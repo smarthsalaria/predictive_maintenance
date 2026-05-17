@@ -32,7 +32,7 @@ def main():
 
     print("-" * 60)
     print(" ALL SYSTEMS ONLINE!")
-    print("You can now close this main window. To stop the system later, simply close the 3 new terminal windows.")
+    print("You can now close this main window. To stop the system later, simply close the 5 new terminal windows.")
 
 if __name__ == "__main__":
     main()

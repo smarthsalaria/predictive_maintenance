@@ -2,6 +2,7 @@ import json
 import random
 import time
 import paho.mqtt.client as mqtt
+from paho.mqtt import enums 
 
 
 BROKER = "127.0.0.1"
@@ -93,10 +94,10 @@ def generate_and_publish_telemetry(client):
         time.sleep(1) 
 
 if __name__ == "__main__":
-    client = mqtt.Client()
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, "SensorNode")    
     client.on_connect = on_connect
     client.on_message = on_message
-    client.connect(BROKER, PORT, 60)
+    client.connect(BROKER, PORT, 120)
     client.loop_start() 
     
     try:

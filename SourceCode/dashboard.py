@@ -64,12 +64,10 @@ st.markdown("""
 header_content, header_control = st.columns([0.9, 0.1])
 
 with header_content:
-    # 1. Centering the Logo using an inner column trick
-    # [Left Spacer, Logo Slot, Right Spacer]
     _, logo_center, _ = st.columns([0.4, 0.2, 0.4])
     with logo_center:
         try:
-            # We don't use use_container_width here so the CSS 'height' takes priority
+            
             st.image("cu_logo.png") 
         except Exception:
             st.markdown("<h1 style='text-align: center;'>🎓</h1>", unsafe_allow_html=True)
@@ -112,7 +110,7 @@ def render_live_dashboard():
     
     
     confidence_text = f" |  AI Confidence: {confidence}%"
-    rul_text = " | RUL: Optimal"
+    rul_text = " | RUL: Optimal/Fault"
 
     if culprit_string != "NONE" and velocity > 0:
         min_countdown = float('inf')
@@ -128,7 +126,7 @@ def render_live_dashboard():
                         min_countdown = time_left
         
         if min_countdown != float('inf'):
-            rul_text = f" |  Time to Failure: {min_countdown:.1f}s"
+            rul_text = f" |  Remaining Useful Life: {min_countdown:.1f}s"
             
     
     banner_extras = confidence_text + rul_text
@@ -208,14 +206,14 @@ def render_live_dashboard():
         
         with chart_cols[idx % 2]:
             st.markdown(f"### {title} {status_text}")
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
 
     st.markdown("---")
     st.markdown("###  Incident History Log")
     incidents_df = fetch_incident_history()
     
     if not incidents_df.empty:
-        st.dataframe(incidents_df, use_container_width=True, hide_index=True, height=250)
+        st.dataframe(incidents_df, width='stretch', hide_index=True, height=250)
     else:
         st.info("No anomalies recorded. The asset is operating optimally.")
 

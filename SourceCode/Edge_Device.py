@@ -49,14 +49,14 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON telemetry(timestamp)')
         conn.commit()
         conn.close()
-        print("✅ SQLite Database Initialized.")
+        print(" SQLite Database Initialized.")
     except Exception as e:
-        print(f"❌ Database Init Error: {e}")
+        print(f" Database Init Error: {e}")
 
 
 def train_model():
     global anomaly_model, train_mean, train_std
-    print("🧠 Fetching historical baseline from SQLite...")
+    print(" Fetching historical baseline from SQLite...")
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
@@ -65,22 +65,22 @@ def train_model():
         conn.close()
 
         if len(rows) < 50:
-            print("⚠️ Insufficient historical data. Synthesizing initial baseline...")
+            print(" Insufficient historical data. Synthesizing initial baseline...")
             X_train = np.array([
                 [np.random.normal(3.0, 0.05), np.random.normal(50.0, 0.5), np.random.normal(16.0, 0.1), np.random.normal(20.0, 0.05)]
                 for _ in range(500)
             ])
         else:
             X_train = np.array(rows)
-            print(f"✅ Successfully loaded {len(X_train)} historical records.")
+            print(f" Successfully loaded {len(X_train)} historical records.")
 
         anomaly_model = IsolationForest(contamination=0.05, random_state=42)
         anomaly_model.fit(X_train)
         train_mean = np.mean(X_train, axis=0)
         train_std = np.std(X_train, axis=0)
-        print("✅ Isolation Forest Model Trained.")
+        print(" Isolation Forest Model Trained.")
     except Exception as e:
-        print(f"❌ Model Training Error: {e}")
+        print(f" Model Training Error: {e}")
 
 
 def on_message(client, userdata, msg):
@@ -212,10 +212,10 @@ def on_message(client, userdata, msg):
         print(f"{status_icon} Inference: {latency_ms:.2f}ms | Conf: {confidence_score}% | Strikes: {consecutive_anomalies} | History: {total_incidents}")
 
     except Exception as e:
-        print(f"❌ Processing Error: {e}")
+        print(f" Processing Error: {e}")
 
 def on_connect(client, userdata, flags, rc):
-    print(f"✅ Connected to MQTT Broker with code {rc}")
+    print(f" Connected to MQTT Broker with code {rc}")
     client.subscribe(TOPIC_SENSORS)
 
 def start_edge_node():

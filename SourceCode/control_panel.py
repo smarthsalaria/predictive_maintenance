@@ -1,12 +1,13 @@
 import json
 import paho.mqtt.client as mqtt
+from paho.mqtt import enums 
 
 BROKER = "127.0.0.1"
 PORT = 1883
 TOPIC_COMMANDS = "bess/cooling_pump_01/simulation"
 
-client = mqtt.Client()
-client.connect(BROKER, PORT, 60)
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, "ControlPanel")    
+client.connect(BROKER, PORT, 120)
 
 def send_command(cmd_string):
     payload = {"command": cmd_string}
